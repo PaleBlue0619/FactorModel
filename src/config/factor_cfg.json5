@@ -1,0 +1,14 @@
+{
+  "dfs://Dayfactor": { // 库名
+    "pt": {
+      "factorFreq": "D",
+      "factorList": []
+    },
+  },
+  "dfs://Minfactor": {
+    "pt": {
+      "factorFreq": "M",
+      "factorList": []
+    },
+  }
+}

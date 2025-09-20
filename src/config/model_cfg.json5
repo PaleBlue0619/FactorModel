@@ -1,0 +1,137 @@
+{ // 初始化模型参数,并对所选参数进行网格搜索
+
+    // 树模型
+    "gbdt": {
+      "default_params": {
+          "criterion": "friedman_mse",
+          "random_state": 42
+      },
+      "grid_params": {
+          "max_depth": [null,5,10],
+          "min_samples_split": [2,3,4],
+          "min_samples_leaf": [1,3,5],
+          "max_features": [1,2]
+      }
+  },
+
+    // 集成模型 (Bagging)
+    "randomforest": {     // 随机森林
+      "default_params": {
+          "criterion": "squared_error",
+          "random_state": 42,
+          "n_jobs": -1  // 并行
+      },
+      "grid_params": {
+          "max_depth": [null,5,10],
+          "min_samples_split": [2,3,4],
+          "max_features": [1,2],
+      }
+    },
+
+    // 集成模型 (Boosting)
+    "adaboost": {
+      "default_params": {
+          "loss": "linear",
+          "random_state": 42
+      },
+      "grid_params": {
+          "n_estimators": [10,50,100],
+          "learning_rate": [0.01,0.1,1.0]
+      }
+    },
+
+    "catboost": {  // catBoost
+      "default_params": {
+          "loss_function":"RMSE",
+          "n_estimators": 100,
+          "early_stopping_rounds": 20,
+          "random_state": 42,
+          "verbose": 0, // 静默模型训练过程
+      },
+      "grid_params": {
+          "learning_rate": [0.01,0.05,0.1],
+          "max_depth": [null,5,10],
+          "l2_leaf_reg": [1,3,5],
+          "random_strength": [0,0.1,1]
+      }
+    },
+    "lightgbm": { // lightGBM
+      "default_params": {
+          "boosting_type": "gbdt",
+          "eval_metric":"rmse",     //    # 指定评估指标"
+          "early_stopping_rounds": 10,
+          "random_state": 42,
+          "verbosity":-1
+      },
+      "grid_params": {
+          "n_estimators": [100,200],
+          "learning_rate": [0.01,0.05,0.1],
+          "num_leaves": [15,31],
+//          "max_depth": [3, 5, -1],
+          "min_child_samples": [10,20,100],
+          "reg_alpha": [0.01,0.1,1.0]     // L1正则化系数(由于数据维度较高)
+      },
+    },
+    "xgboost": {  // XGBoost
+      "default_params": {
+          "booster": "gbtree",  // 表现远远胜过linear
+          "random_state": 42,
+          "early_stopping_rounds": 10, // dropout机制
+          "n_jobs": -1, // 并行?
+          "silent": 1,
+          "verbosity": 0 // 静默模型训练过程
+      },
+      "grid_params": {
+          "n_estimators": [100,200],
+          "learning_rate": [0.01,0.05,0.1],
+          "max_depth": [3, 5, -1],
+          "subsample": [0.6,0.8,1.0],       // 样本采样比例(参照随机森林)
+          "reg_alpha": [0.01,0.1,1.0]     // L1正则化系数(由于数据维度较高)
+      }
+    },
+
+    // 神经网络模型(sklearn实现)
+    "mlp": {
+       "default_params": {
+          "hidden_layer_sizes": [30,],  // 默认单隐层30个神经元
+          "activation": "relu",          // 最常用的激活函数
+          "solver": "adam",              // 适合大多数情况的优化器
+          "random_state": 42,
+          "early_stopping": true,        // dropout机制
+          "n_iter_no_change": 10
+        },
+        "grid_params": {
+          "hidden_layer_sizes": [[10,], [30,], [50,]],  // 不同网络结构
+          "alpha": [0.0001, 0.001, 0.01],  // L2正则化系数
+          "learning_rate_init": [0.001, 0.01],  // 初始学习率
+          "batch_size": [16, 32],        // 批量大小
+          // "beta_1": [0.9, 0.99]         // Adam优化器的动量参数
+        }
+    },
+
+    // DNN(skorch实现)
+    "dnn": {
+        "default_params": {  //  去template.torch_model中修改
+          "verbose": -1,
+        },
+        "grid_params": {
+          'module__hidden_dim': [16, 32],  // 隐藏层维度
+          'module__dropout': [0.1, 0.2, 0.3],  // Dropout 概率
+          'lr': [0.01, 0.001],  //学习率
+          'max_epochs': [50, 100]  //最大训练轮数
+        }
+    },
+
+    // RESNET(skorch实现)
+    "resnet": {
+        "default_params": {  //  去template.torch_model中修改
+          "verbose": -1,
+        },
+        "grid_params": {
+          'module__hidden_dim': [16, 32],  // 隐藏层维度
+          'module__dropout': [0.1, 0.2, 0.3],  // Dropout 概率
+          'lr': [0.01, 0.001],  //学习率
+          'max_epochs': [50, 100]  //最大训练轮数
+        }
+    }
+}
