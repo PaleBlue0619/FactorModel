@@ -1,15 +1,22 @@
 import os,sys
 import json,json5
 import time
+import tqdm
 import pandas as pd
 import numpy as np
 import dolphindb as ddb
 import torch
-import tqdm
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.base import BaseEstimator
-from typing import List, Dict
+from sklearn.ensemble import AdaBoostRegressor  # AdaBoost
+from sklearn.ensemble import RandomForestRegressor  # RandomForest
+from sklearn.ensemble import GradientBoostingRegressor  # GBDT回归器
+from sklearn.neural_network import MLPRegressor # MLP(sklearn版)
+# from catboost import CatBoostRegressor  # CatBoost
+from lightgbm import LGBMRegressor      # LGBM
+from xgboost import XGBRegressor        # XGB
+from typing import List, Dict, Tuple
 from utils import init_path, get_glob_list
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -201,14 +208,14 @@ class ModelBackTest:
                 freq = "{self.freq.lower()}"
                 
                 // 获取这个period对应的TradeDate & TradeTime
-                periodDF = objByName("{self.periodDF}")
-                idx = find(periodDF[`period],{startPeriod})
-                targetDate = periodDF[`TradeDate][idx]
-                targetTime = periodDF[`TradeTime][idx]
+                DF = select * from objByName("{self.periodDF}")
+                idx = find(DF[`period],{startPeriod})
+                targetDate = DF[`TradeDate][idx]
+                targetTime = DF[`TradeTime][idx]
             
                 // 获取特征列名称
                 featureList = exec featureName from  
-                        from loadTable("{self.selectDB}","{self.selectTB}") 
+                        loadTable("{self.selectDB}","{self.selectTB}") 
                         where selectMethod == "{selectMethod}" and TradeDate == targetDate and TradeTime == targetTime
                 
                 if (size(featureList) == 0){{
@@ -246,18 +253,18 @@ class ModelBackTest:
                 freq = "{self.freq.lower()}"
 
                 // 获取这个period对应的TradeDate & TradeTime
-                periodDF = objByName("{self.periodDF}")
-                startIdx = find(periodDF[`period],{startPeriod})
-                endIdx = find(periodDF[`period],{endPeriod})
-                startDate = periodDF[`TradeDate][startIdx]
-                endDate = periodDF[`TradeDate][endIdx]
-                startTime = periodDF[`TradeTime][startIdx]
-                endTime = periodDF[`TradeTime][endIdx]
+                DF = select * from objByName("{self.periodDF}")
+                startIdx = find(DF[`period],{startPeriod})
+                endIdx = find(DF[`period],{endPeriod})
+                startDate = DF[`TradeDate][startIdx]
+                endDate = DF[`TradeDate][endIdx]
+                startTime = DF[`TradeTime][startIdx]
+                endTime = DF[`TradeTime][endIdx]
                 startTimeStamp = concatDateTime(startDate,startTime)
                 endTimeStamp = concatDateTime(endDate,endTime)
                 
                 // 获取特征列名称
-                featureList = exec featureName from  
+                featureList = exec featureName  
                         from loadTable("{self.selectDB}","{self.selectTB}") 
                         where selectMethod == "{selectMethod}" 
                         and (concatDateTime(TradeDate,TradeTime) between startTimeStamp and endTimeStamp)
@@ -347,20 +354,19 @@ class ModelBackTest:
         startDate = pd.Timestamp(startDate).strftime("%Y.%m.%d")
         endDate = pd.Timestamp(endDate).strftime("%Y.%m.%d")
         startTime = str(startTime).zfill(4)
-        startTime = f"{startTime[:2]}{startTime[2:]}:00.000"
+        startTime = f"{startTime[:2]}:{startTime[2:]}:00.000"
         endTime = str(endTime).zfill(4)
-        endTime = f"{endTime[:2]}{endTime[2:]}:00.000"
+        endTime = f"{endTime[:2]}:{endTime[2:]}:00.000"
         for model in self.model_list:
             init_path(path_dir=rf"{self.savePath}/{model}")
-        appender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
-                                                tableName=self.resultTB,
-                                                partitionColName="date",
-                                                dbConnectionPool=self.pool)  # 写入数据的appender
+        appender = ddb.TableAppender(dbPath=self.resultDB,
+                                     tableName=self.resultTB,
+                                     ddbSession=session)  # 写入数据的appender
         totalPeriodList = self.session.run(f"""
-        exec period from objByName("{self.periodDF}") 
+                exec period from objByName("{self.periodDF}") 
                 where concatDateTime(TradeDate, TradeTime) 
-                between concatDateTime({startDate},"{startTime}") 
-                and concatDateTime({endDate},"{endTime}")
+                between concatDateTime({startDate},{startTime}) 
+                and concatDateTime({endDate},{endTime})
         """)    # 所有需要回测的period list
         # 训练集&测试集划分函数
         self.session.run(f"""
@@ -372,21 +378,33 @@ class ModelBackTest:
             allRows = 0..(n-1)
             trainRows = allRows[allScores>=percentile(allScores,trainSplit*100,"linear")]
             testRows = allRows[!(allRows in trainRows)]
-            trainData = x[trainRows, ]
-            testData = x[testRows, ]
+            trainData = data[trainRows, ]
+            testData = data[testRows, ]
             return trainData, testData
         }}
         """)
-
+        # 确定最小的period -> select 有时会舍弃一部分开头的数据
+        minPeriod = self.session.run(f"""
+        t = exec min(concatDateTime(TradeDate,TradeTime)) 
+            from loadTable("{self.selectDB}","{self.selectTB}")
+        // 查询最小时间戳对应着的period int
+        DF = select *, concatDateTime(TradeDate,TradeTime) as TimeStamp 
+             from objByName("{self.periodDF}")
+        idx = find(DF[`TimeStamp], t);
+        minPeriod = DF[`period][idx]; 
+        
+        // 返回select有数据对应的最小的Period
+        minPeriod
+        """)
+        totalPeriodList = [i for i in totalPeriodList if i>=minPeriod+1]    # 得保证至少有一期历史数据
 
         for period in tqdm.tqdm(totalPeriodList, desc="Model BackTesting..."):
-            if period<=self.callBackPeriod:
-                continue
             # 解析当前对应的period，若没有则跳过
             totalData = self.getData(selectMethod=self.selectMethod,
                                      labelName=self.labelName,
-                                     startPeriod=period-1-self.callBackPeriod,
+                                     startPeriod=period-self.callBackPeriod,
                                      endPeriod=period-1)
+            print(totalData.head())
 
             # Method
             # ---train----
@@ -412,7 +430,6 @@ if __name__ == "__main__":
     pool=ddb.DBConnectionPool("172.16.0.184",8001,10,"maxim","dyJmoc-tiznem-1figgu")
     from model.Label import get_DayLabel
     from model.Select import get_DayFeature
-    from model.Train import to_dolphindb
     from model.Dnn import CustomDNN,get_DNN
     from model.Resnet import CustomResNet,get_RESNET
 
@@ -442,10 +459,10 @@ if __name__ == "__main__":
                       resultDesc="result20250920")
     M.get_factorList(inplace=True)
     M.get_periodList()
-    print(M.factor_list)
+    # print(M.factor_list)
     # M.init_labelDB(dropDB=False,dropTB=True)        # 创建预测标签数据库
     # M.init_selectDB(dropDB=False,dropTB=True)       # 创建因子选择数据库
     # M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
     # M.add_labelData()   # 添加标签数据库
     # M.add_selectData()  # 添加选择数据库
-    # print(M.factor_cfg)
+    M.run(M.startDate, 1500, M.endDate, 1500)

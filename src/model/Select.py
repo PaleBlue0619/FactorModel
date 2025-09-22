@@ -17,12 +17,12 @@ def get_DayFeature(self: ModelBackTest):
                     where factor in {self.factor_list}; 
         
         // 读取标签数据
-        label_df = select symbol, MaxDate as TradeDate, method, label 
+        label_df = select symbol, MaxDate as TradeDate, labelName, label 
                     from loadTable("{self.labelDB}","{self.labelTB}")
-                    where method == "ret5D"
+                    where labelName == "ret5D"
 
         // left join 
-        result_df = lj(factor_df, label_df, `symbol`TradeDate)  // symbol,TradeDate,factor,value,method,label
+        result_df = lj(factor_df, label_df, `symbol`TradeDate)  // symbol,TradeDate,factor,value,labelName,label
         
         // 添加period
         distinct_time_list = sort(exec distinct(TradeDate) from result_df)
@@ -32,12 +32,12 @@ def get_DayFeature(self: ModelBackTest):
         // 筛选每期的优秀因子+存入selectDB中
         result_df = select 0 as selected, corr(rank(label),rank(value)) as IC 
                     from result_df 
-                    group by TradeDate,factor,method 
-        update result_df set IC_avg = abs(mavg(IC,5)) context by factor,method
+                    group by TradeDate,factor,labelName 
+        update result_df set IC_avg = abs(mavg(IC,5)) context by factor,labelName
         update result_df set selected = 1 
                             where IC_avg >= percentile(IC_avg, 0.5, "midpoint") 
-                            context by TradeDate,method
-        result_df = select TradeDate,15:00:00.000 as TradeTime,method,factor as featureName 
+                            context by TradeDate,labelName
+        result_df = select TradeDate,15:00:00.000 as TradeTime,labelName,factor as featureName 
                     from result_df where selected == 1;
         loadTable("{self.selectDB}","{self.selectTB}").append!(result_df);
     """)
