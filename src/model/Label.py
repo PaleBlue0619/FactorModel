@@ -4,7 +4,7 @@ def get_DayLabel(self: ModelBackTest):
     """
     统一的日频标签生成函数
     -> return table(
-        ["symbol","tradeDate","tradeTime","method","label"]
+        ["symbol","tradeDate","tradeTime","method","label","maxDate","maxTime"]
     )
     """
     kdbName = "dfs://DayKDBOfIndex"
@@ -28,7 +28,7 @@ def get_DayLabel(self: ModelBackTest):
                       "ret5D" as method,
                       nullFill((move(close,-5)-open)\open,0) as label,
                       nullFill(move(TradeDate,-5).date(),temporalDeltas(TradeDate,"XSHG")) as MaxDate,
-                      nullFill(move(TradeTime,-5).time(),max(TradeTime)) as MaxTime
+                      15:00:00.000 as MaxTime
                 from label_df 
                 context by symbol
     loadTable("{self.labelDB}","{self.labelTB}").append!(label_df)
