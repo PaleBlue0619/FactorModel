@@ -17,7 +17,7 @@ from sklearn.neural_network import MLPRegressor # MLP(sklearn版)
 from lightgbm import LGBMRegressor      # LGBM
 from xgboost import XGBRegressor        # XGB
 from typing import List, Dict, Tuple
-from utils import init_path, get_glob_list
+from utils import init_path, get_glob_list, save_model, load_model
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 class ModelBackTest:
@@ -28,20 +28,43 @@ class ModelBackTest:
                  selectDB: str, selectTB: str, selectMethod: str, selectFunc, # 每期模型的特征: symbol tradeDate tradeTime featureName
                  labelDB: str, labelTB: str, labelName: str, labelFunc,   # 每期模型的标签
                  resultDB: str, resultTB: str,  # 每期模型的结果
-                 seed: int = 42, nJobs: int = -1,
+                 seed: int = 42, nJobs: int = -1, cv: int = 5, # K折交叉验证
+                 earlyStopping: bool = False,   # 是否对能够使用早停的模型进行早停
                  callBackPeriod: int = 1,   # 利用过去K期数据进行训练
                  splitTrain: float = 0.8,   # 训练集划分比例
                  selfModel: Dict = None,
-                 modelList: list = None,
-                 resultDesc: str = None):
+                 modelList: list = None):
         """
-        session: DolphinDB Session
-        pool: DolphinDB ConnectionPool
-        resultDB: 数据库
-        resultTB: 数据表
-        factor_cfg: 因子池配置
+        :param session: DolphinDB session
+        :param pool: DolphinDB Connection Pool
+        :param startDate: 回测开始日期
+        :param endDate: 回测结束日期
+        :param factorDB: 因子数据库名称
+        :param factorTB: 因子数据表名称
+        :param factorList: 所有候选的因子池
+        :param freq: 因子频率->目前只支持同频训练+预测
+        :param model_cfg: 模型参数字典
+        :param savePath: 模型保存路径, 实际路径为savePath/modelName/xxx.bin
+        :param selectDB: 因子(X)选择数据库
+        :param selectTB: 因子(X)选择数据表
+        :param selectMethod: 特征选择方式
+        :param selectFunc: 特征选择函数
+        :param labelDB: 标签(Y)选择数据库
+        :param labelTB: 标签(Y)选择数据表
+        :param labelName: 标签构造名称
+        :param labelFunc: 标签构造函数
+        :param resultDB: 结果数据库: Y~Y_Pred
+        :param resultTB: 结果数据表
+        :param seed: 随机种子
+        :param nJobs: 训练多个模型的并行度
+        :param cv: K折交叉验证
+        :param earlyStopping: 是否对于能够早停的模型进行早停
+        :param callBackPeriod: 回看期:利用[t-callBackPeriod,t-1]的样本进行训练
+        :param splitTrain: 训练集-测试集划分比例
+        :param selfModel: 自定义模型配置项
+        :param modelList: 所有使用的模型list
+        """
 
-        """
         # 全局配置
         self.startDate = pd.Timestamp(startDate).strftime("%Y.%m.%d")
         self.endDate = pd.Timestamp(endDate).strftime("%Y.%m.%d")   # 2020.01.04
@@ -59,9 +82,11 @@ class ModelBackTest:
 
         # 模型部分
         self.seed = seed
+        self.cv = cv
         self.nJobs = nJobs
         self.splitTrain = splitTrain
         self.callBackPeriod = callBackPeriod
+        self.earlyStopping = earlyStopping
         self.model_cfg = model_cfg
         self.modelFunc = {"adaboost": AdaBoostRegressor,      # AdaBoost
                           "gbdt": GradientBoostingRegressor,  # GBDT回归器
@@ -74,7 +99,7 @@ class ModelBackTest:
         self.earlyStopModel = ["lightgbm","xgboost"]
         if selfModel:
             self.modelFunc.update(selfModel)
-        self.model_list = self.modelFunc.keys() if not modelList else modelList
+        self.model_list = [i.lower() for i in self.modelFunc.keys()] if not modelList else modelList
         init_path(path_dir=savePath)
         self.savePath = savePath
 
@@ -89,7 +114,6 @@ class ModelBackTest:
         self.resultTB = resultTB
 
         # 结果部分
-        self.resultDesc = "ModelDefault" if not resultDesc else resultDesc
         self.selectFunc = selectFunc
         self.labelFunc = labelFunc
 
@@ -109,16 +133,26 @@ class ModelBackTest:
     def get_periodList(self):
         """
         返回一个共享变量->TradeDate TradeTime period
+        最终格式: symbol TradeDate TradeTime period label factor
+        共享变量: TradeDate TradeTime MaxDate MaxTime period
         """
         self.session.run(f"""
             freq = "{self.freq.lower()}"
-            if (freq == "d"){{
-                pt = select 15:00:00.000 as TradeTime, 1.0 as period 
+            if (freq == "d"){{ // 日频
+                factorPt = select 15:00:00.000 as TradeTime, 1.0 as period 
                      from loadTable("{self.factorDB}","{self.factorTB}") 
                     group by date as TradeDate
-            }}else{{
-                pt = select 1.0 as period from loadTable("{self.factorDB}","{self.factorTB}")
+                labelPt = select TradeDate, TradeTime, MaxDate, MaxTime 
+                    from loadTable("{self.labelDB}","{self.labelTB}")
+                    where labelName == "{self.labelName}" context by TradeDate,TradeTime limit 1
+                pt = lj(factorPt, labelPt, `TradeDate`TradeTime)
+            }}else{{ // 分钟频
+                factorPt = select 1.0 as period from loadTable("{self.factorDB}","{self.factorTB}")
                     group by date as TradeDate, time as TradeTime
+                labelPt = select TradeDate, TradeTime, MaxDate, MaxTime 
+                    from loadTable("{self.labelDB}","{self.labelTB}")
+                    where labelName == "{self.labelName}" context by TradeDate,TradeTime limit 1
+                pt = lj(factorPt, labelPt, `TradeDate`TradeTime)
             }}
             update pt set period = cumsum(period);
             share(pt, "{self.periodDF}");  // 共享变量
@@ -186,21 +220,27 @@ class ModelBackTest:
         if not self.session.existsTable(self.resultDB, self.resultTB):
             """新建数据库表"""
             self.session.run(f"""
-            db1 = database(,VALUE,2010.01M..2030.01M)
-            db2 = database(,VALUE,[`Maxim,`DolphinDB])
-            db = database("{self.resultDB}",partitionType=COMPO, partitionScheme=[db1, db2], engine="TSDB")
-            schemaTb = table(1:0, ["Desc","symbol","TradeDate","TradeTime","label","labelPred"],
+            db = database("{self.resultDB}",VALUE,2010.01M..2030.01M, engine="TSDB")
+            schemaTb = table(1:0, ["ModelName","symbol","TradeDate","TradeTime","label","labelPred"],
                                     [SYMBOL,SYMBOL,DATE,TIME,DOUBLE,DOUBLE])
-            db.createPartitionedTable(schemaTb, "{self.resultTB}", partitionColumns=`TradeDate`Desc, 
-                sortColumns=`Desc`symbol`TradeTime`TradeDate, keepDuplicates=LAST)
+            db.createPartitionedTable(schemaTb, "{self.resultTB}", partitionColumns=`TradeDate, 
+                sortColumns=`ModelName`symbol`TradeTime`TradeDate, keepDuplicates=LAST)
             """)
 
-    def getData(self, selectMethod: str, labelName: str, startPeriod: int, endPeriod: int) -> pd.DataFrame:
+    def getData(self, selectMethod: str, labelName: str,
+                startPeriod: int, endPeriod: int, factorList: list = None) -> pd.DataFrame:
         """
-        传入开始时间和结束时间
-        获取数据的接口-> table(label,factor).lj(`symbol`TradeDate`TradeTime)
         返回一张宽表: symbol,TradeDate,TradeTime,label,factorList
+        :param selectMethod: 选择方式str
+        :param labelName: 标签名称str
+        :param startPeriod: 开始的period int
+        :param endPeriod: 结束的period int
+        :param factorList: Optional, 不填则根据[startPeriod,endPeriod]区间的所有factorList进行选择
+        :return:
         """
+        if not factorList:
+            factorList = []
+
         if startPeriod == endPeriod:
             # 说明只需要取一个Period的factor
             data = self.session.run(rf"""
@@ -218,6 +258,10 @@ class ModelBackTest:
                         loadTable("{self.selectDB}","{self.selectTB}") 
                         where selectMethod == "{selectMethod}" and TradeDate == targetDate and TradeTime == targetTime
                 
+                if (size({factorList})>0){{
+                    featureList = {factorList}
+                }}
+                
                 if (size(featureList) == 0){{
                     print("period:{startPeriod}没有找到对应的特征,请重新设置")
                 }}
@@ -227,7 +271,8 @@ class ModelBackTest:
                     // 因子数据
                     factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}") 
                                 where factor in featureList and date == targetDate 
-                                pivot by symbol, date as TradeDate
+                                pivot by symbol, date as TradeDate, factor
+                    update factor_df set TradeTime = 15:00:00.000
                     // 标签数据
                     label_df = select symbol,TradeDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
                                 where labelName == "{labelName}" and TradeDate == targetDate and TradeTime == targetTime
@@ -236,7 +281,7 @@ class ModelBackTest:
                     // 因子数据
                     factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}")
                                 where factor in featureList and date == targetDate and time == targetTime
-                                pivot by symbol, date as TradeDate, time as TradeTime
+                                pivot by symbol, date as TradeDate, time as TradeTime, factor
                     // 标签数据
                     label_df = select symbol,TradeDate,TradeTime,label from loadTable("{self.labelDB}","{self.labelTB}") 
                                 where labelName == "{labelName}" and TradeDate == targetDate and TradeTime == targetTime
@@ -268,7 +313,11 @@ class ModelBackTest:
                         from loadTable("{self.selectDB}","{self.selectTB}") 
                         where selectMethod == "{selectMethod}" 
                         and (concatDateTime(TradeDate,TradeTime) between startTimeStamp and endTimeStamp)
-
+                
+                if (size({factorList}) > 0){{
+                    featureList = {factorList}
+                }}
+                
                 if (size(featureList) == 0){{
                     print("period:{startPeriod}~{endPeriod}没有找到对应的特征,请重新设置")
                 }}
@@ -278,7 +327,8 @@ class ModelBackTest:
                     // 因子数据
                     factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}") 
                                 where factor in featureList and (date between startDate and endDate) 
-                                pivot by symbol, date as TradeDate
+                                pivot by symbol, date as TradeDate, factor
+                    update factor_df set TradeTime = 15:00:00.000
                     // 标签数据
                     label_df = select symbol,TradeDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
                                 where labelName == "{labelName}" and (TradeDate between startDate and endDate)
@@ -287,7 +337,7 @@ class ModelBackTest:
                     // 因子数据
                     factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}")
                                 where factor in featureList and (concatDateTime(date,time) between startTimeStamp and endTimeStamp)
-                                pivot by symbol, date as TradeDate, time as TradeTime
+                                pivot by symbol, date as TradeDate, time as TradeTime, factor
                     // 标签数据
                     label_df = select symbol,TradeDate,TradeTime,label from loadTable("{self.labelDB}","{self.labelTB}") 
                                 where labelName == "{labelName}" and (concatDateTime(TradeDate,TradeTime) between startTimeStamp and endTimeStamp)
@@ -311,6 +361,7 @@ class ModelBackTest:
         """
 
         # 参数准备 （解析model_cfg）
+        model_cfg = self.model_cfg[modelName]
         default_params, grid_params = model_cfg["default_params"], model_cfg["grid_params"]
         input_dim = x.shape[1]
         np.random.seed(self.seed)
@@ -339,12 +390,6 @@ class ModelBackTest:
 
         return bestModel.fit(x, y)
 
-    def pick(self, startPeriod: int, endPeriod: int, model_list: list, zscore: bool = True):
-        """skorch训练模型并将最优模型保存至本地"""
-
-    def pred(self, startPeriod: int, endPeriod: int, model_list: list):
-        """从本地指定路径加载模型进行增量预测"""
-
     def run(self, startDate: pd.Timestamp, startTime: int, endDate: pd.Timestamp, endTime:int):
         """
         策略运行的主体函数
@@ -359,15 +404,10 @@ class ModelBackTest:
         endTime = f"{endTime[:2]}:{endTime[2:]}:00.000"
         for model in self.model_list:
             init_path(path_dir=rf"{self.savePath}/{model}")
-        appender = ddb.TableAppender(dbPath=self.resultDB,
+        appender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
                                      tableName=self.resultTB,
-                                     ddbSession=session)  # 写入数据的appender
-        totalPeriodList = self.session.run(f"""
-                exec period from objByName("{self.periodDF}") 
-                where concatDateTime(TradeDate, TradeTime) 
-                between concatDateTime({startDate},{startTime}) 
-                and concatDateTime({endDate},{endTime})
-        """)    # 所有需要回测的period list
+                                     partitionColName="TradeDate",
+                                     dbConnectionPool=self.pool)  # 写入数据的appender
         # 训练集&测试集划分函数
         self.session.run(f"""
         def trainTestSplit(data){{
@@ -396,33 +436,58 @@ class ModelBackTest:
         // 返回select有数据对应的最小的Period
         minPeriod
         """)
-        totalPeriodList = [i for i in totalPeriodList if i>=minPeriod+1]    # 得保证至少有一期历史数据
+        periodDF = self.session.run(f"""
+        select * from objByName("{self.periodDF}")
+        """)    # 直接把所有数据取至内存
 
-        for period in tqdm.tqdm(totalPeriodList, desc="Model BackTesting..."):
+        for idx,row in tqdm.tqdm(periodDF.iterrows(), total=periodDF.shape[0], desc="Model BackTesting"):
+            currentDate, currentTime, currentPeriod = row["MaxDate"], row["MaxTime"], row["period"]
+            currentTimeStamp = pd.Timestamp.combine(currentDate.date(), currentTime.time())
+            if currentPeriod<=minPeriod:    # 至少留一期历史的
+                continue
+
             # 解析当前对应的period，若没有则跳过
-            totalData = self.getData(selectMethod=self.selectMethod,
+            trainData = self.getData(selectMethod=self.selectMethod,
                                      labelName=self.labelName,
-                                     startPeriod=period-self.callBackPeriod,
-                                     endPeriod=period-1)
-            print(totalData.head())
-
-            # Method
-            # ---train----
-
-            # 提取对应时间的特征列数据[离他最近比他小]
-
-            # 训练集/测试集划分
-
-            # 进行并行训练skorch搜索参数
-
-            # 保存模型
-
+                                     startPeriod=currentPeriod-self.callBackPeriod,
+                                     endPeriod=currentPeriod-1)
+            factorList = [i for i in list(trainData.columns)
+                          if i not in ["symbol","TradeDate","TradeTime","label"]]
+            predData = self.getData(selectMethod=self.selectMethod,
+                                    labelName=self.labelName,
+                                    startPeriod=currentPeriod,
+                                    endPeriod=currentPeriod,
+                                    factorList=factorList   # 这里与训练集的特征保持一致
+                                    )
+            x, y = trainData[factorList], trainData["label"]
+            train_x, eval_x, train_y, eval_y = train_test_split(x, y,
+                                                        test_size=self.splitTrain,
+                                                        random_state=self.seed)
+            pred_x, real_y = predData[factorList], predData["label"]
+            # ---train---
+            for modelName in self.model_list:
+                if modelName in self.earlyStopModel and self.earlyStopping: # 启用早停机制
+                    bestModel = self.train(train_x, train_y, modelName=modelName, cv=self.cv,
+                               evalSet=[(eval_x, eval_y)])
+                else:   # 不启用早停机制
+                    bestModel = self.train(x, y, modelName=modelName, cv=self.cv, evalSet=None)
+                # 保存模型
+                save_model(bestModel,
+                           save_path=rf"{self.savePath}/{modelName}",
+                           file_name=str(currentTimeStamp.strftime("%Y-%m-%d_%H-%M-%S")),
+                           target_format="bin")
             # ---pred---
-
-            # 调用模型进行预测
-
-            # 保存至数据库
-
+            for modelName in self.model_list:
+                bestModel = load_model(load_path=rf"{self.savePath}/{modelName}",
+                           file_name=str(currentTimeStamp.strftime("%Y-%m-%d_%H-%M-%S")),
+                           target_format="bin")
+                res = predData[["symbol","TradeDate","TradeTime","label"]]
+                res["TradeDate"] = currentDate
+                res["TradeTime"] = currentTime
+                res["labelPred"] = bestModel.predict(pred_x)
+                res.insert(0, "ModelName", [modelName]*res.shape[0])
+                # 保存至数据库
+                appender.append(res)
 
 if __name__ == "__main__":
     session = ddb.session()
@@ -448,21 +513,20 @@ if __name__ == "__main__":
                        'shio_avg20',
                        'shio_std20'
                       ],
-                      model_cfg=model_cfg, nJobs=-1, callBackPeriod=1,
+                      model_cfg=model_cfg, cv=5, nJobs=-1, callBackPeriod=1, earlyStopping=True,
                       modelList=["lightgbm","xgboost"], selfModel={"dnn": [CustomDNN, get_DNN], "resnet": [CustomResNet, get_RESNET]},
                       savePath=r"D:\DolphinDB\Project\FactorModel\model",
                       selectDB="dfs://Select",selectTB="Select20250920", selectMethod="ret5D",
                       labelDB="dfs://Label", labelTB="Label20250920", labelName="ret5D",
                       resultDB="dfs://Model",resultTB="Model20250920",
                       selectFunc=get_DayFeature,
-                      labelFunc=get_DayLabel,
-                      resultDesc="result20250920")
+                      labelFunc=get_DayLabel)
     M.get_factorList(inplace=True)
     M.get_periodList()
     # print(M.factor_list)
     # M.init_labelDB(dropDB=False,dropTB=True)        # 创建预测标签数据库
     # M.init_selectDB(dropDB=False,dropTB=True)       # 创建因子选择数据库
-    # M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
+    M.init_resultDB(dropDB=True,dropTB=True)       # 创建模型训练结果保存数据库
     # M.add_labelData()   # 添加标签数据库
     # M.add_selectData()  # 添加选择数据库
     M.run(M.startDate, 1500, M.endDate, 1500)
