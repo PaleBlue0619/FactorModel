@@ -23,7 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class ModelBackTest:
     def __init__(self, session: ddb.session, pool:ddb.DBConnectionPool,
                  startDate: str, endDate: str,
-                 factorDB: str, factorTB: str, factorList: str, freq: str, # 模型频率(D/M)
+                 factorDB: str, factorTB: str, factorList: str, freq: str, toFactorDB: bool, # 模型频率(D/M)
                  model_cfg: Dict, savePath: str,  # 本地模型保存路径: savePath/{modelName}
                  selectDB: str, selectTB: str, selectMethod: str, selectFunc, # 每期模型的特征: symbol tradeDate tradeTime featureName
                  labelDB: str, labelTB: str, labelName: str, labelFunc,   # 每期模型的标签
@@ -33,7 +33,9 @@ class ModelBackTest:
                  callBackPeriod: int = 1,   # 利用过去K期数据进行训练
                  splitTrain: float = 0.8,   # 训练集划分比例
                  selfModel: Dict = None,
-                 modelList: list = None):
+                 modelList: list = None,
+                 factorPrefix: str = ""     # toFactorDB == True时生效, 保存至因子数据库的因子为factorPrefix+ModelName
+                 ):
         """
         :param session: DolphinDB session
         :param pool: DolphinDB Connection Pool
@@ -43,6 +45,7 @@ class ModelBackTest:
         :param factorTB: 因子数据表名称
         :param factorList: 所有候选的因子池
         :param freq: 因子频率->目前只支持同频训练+预测
+        :param toFactorDB: 是否将合成后的因子保存回FactorDB
         :param model_cfg: 模型参数字典
         :param savePath: 模型保存路径, 实际路径为savePath/modelName/xxx.bin
         :param selectDB: 因子(X)选择数据库
@@ -63,6 +66,7 @@ class ModelBackTest:
         :param splitTrain: 训练集-测试集划分比例
         :param selfModel: 自定义模型配置项
         :param modelList: 所有使用的模型list
+        :param factorPrefix: 保存至因子数据库的合成因子前缀, 完整因子名为factorPrefix+ModelName
         """
 
         # 全局配置
@@ -79,6 +83,8 @@ class ModelBackTest:
         self.factorTB = factorTB
         self.factor_list = factorList
         self.freq = freq
+        self.toFactorDB = toFactorDB
+        self.factorPrefix = factorPrefix
 
         # 模型部分
         self.seed = seed
@@ -404,10 +410,14 @@ class ModelBackTest:
         endTime = f"{endTime[:2]}:{endTime[2:]}:00.000"
         for model in self.model_list:
             init_path(path_dir=rf"{self.savePath}/{model}")
-        appender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
+        resultAppender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
                                      tableName=self.resultTB,
                                      partitionColName="TradeDate",
                                      dbConnectionPool=self.pool)  # 写入数据的appender
+        factorAppender = ddb.TableAppender(dbPath=self.factorDB,
+                                            tableName=self.factorTB,
+                                           ddbSession=self.session)
+
         # 训练集&测试集划分函数
         self.session.run(f"""
         def trainTestSplit(data){{
@@ -487,7 +497,14 @@ class ModelBackTest:
                 res["labelPred"] = bestModel.predict(pred_x)
                 res.insert(0, "ModelName", [modelName]*res.shape[0])
                 # 保存至数据库
-                appender.append(res)
+                resultAppender.append(res)
+
+                if self.toFactorDB:
+                    res["ModelName"] = res["ModelName"].add_prefix(self.factorPrefix)   # 添加前缀
+                    if self.freq.lower() == "d":
+                        factorAppender.append(res[["symbol","TradeDate","ModelName","label"]])
+                    else:
+                        factorAppender.append(res[["symbol","TradeDate","TradeTime","ModelName","label"]])
 
 if __name__ == "__main__":
     session = ddb.session()
@@ -498,26 +515,33 @@ if __name__ == "__main__":
     from model.Dnn import CustomDNN,get_DNN
     from model.Resnet import CustomResNet,get_RESNET
 
-    with open(r".\config\factor_cfg.json5","r",encoding='utf-8') as f:
+    with open(r".\config\factorPool_cfg.json5","r",encoding='utf-8') as f:
         factor_cfg = json5.load(f)
     with open(r".\config\model_cfg.json5","r",encoding="utf-8") as f:
         model_cfg = json5.load(f)
     M = ModelBackTest(session, pool,
                       startDate="20200101", endDate="20250430",
                       factorDB="dfs://Dayfactor",
-                      factorTB="pt", freq="D",
-                      factorList=['shio',
-                       'shioStrong',
-                       'shioStrong_avg20',
-                       'shioStrong_std20',
-                       'shio_avg20',
-                       'shio_std20'
-                      ],
+                      factorTB="pt", freq="D", toFactorDB=True, factorPrefix="ShioInter_",
+                      factorList=["shio",
+                            "shio_avg20",
+                            "shio_std20",
+                            "shioStrong",
+                            "shioStrong_avg20",
+                            "shioStrong_std20",
+                            "shioWeak",
+                            "shioWeak_avg20",
+                            "shioWeak_std20",
+                            "interDayReturn",
+                            "interDayReturn_avg20",
+                            "interDayReturn_std20"],
                       model_cfg=model_cfg, cv=5, nJobs=-1, callBackPeriod=1, earlyStopping=True,
-                      modelList=["lightgbm","xgboost"], selfModel={"dnn": [CustomDNN, get_DNN], "resnet": [CustomResNet, get_RESNET]},
+                      modelList=["lightgbm","xgboost"],
+                      selfModel={"dnn": [CustomDNN, get_DNN],
+                                "resnet": [CustomResNet, get_RESNET]},
                       savePath=r"D:\DolphinDB\Project\FactorModel\model",
+                      labelDB="dfs://DayLabel", labelTB="pt", labelName="ret5D",
                       selectDB="dfs://Select",selectTB="Select20250920", selectMethod="ret5D",
-                      labelDB="dfs://Label", labelTB="Label20250920", labelName="ret5D",
                       resultDB="dfs://Model",resultTB="Model20250920",
                       selectFunc=get_DayFeature,
                       labelFunc=get_DayLabel)
@@ -526,7 +550,7 @@ if __name__ == "__main__":
     # print(M.factor_list)
     # M.init_labelDB(dropDB=False,dropTB=True)        # 创建预测标签数据库
     # M.init_selectDB(dropDB=False,dropTB=True)       # 创建因子选择数据库
-    M.init_resultDB(dropDB=True,dropTB=True)       # 创建模型训练结果保存数据库
+    # M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
     # M.add_labelData()   # 添加标签数据库
     # M.add_selectData()  # 添加选择数据库
     M.run(M.startDate, 1500, M.endDate, 1500)
