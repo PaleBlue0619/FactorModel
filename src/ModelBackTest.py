@@ -146,18 +146,22 @@ class ModelBackTest:
             freq = "{self.freq.lower()}"
             if (freq == "d"){{ // 日频
                 factorPt = select 15:00:00.000 as TradeTime, 1.0 as period 
-                     from loadTable("{self.factorDB}","{self.factorTB}") 
+                     from loadTable("{self.factorDB}","{self.factorTB}")
+                     where date between {self.startDate} and {self.endDate} 
                     group by date as TradeDate
                 labelPt = select TradeDate, TradeTime, MaxDate, MaxTime 
                     from loadTable("{self.labelDB}","{self.labelTB}")
-                    where labelName == "{self.labelName}" context by TradeDate,TradeTime limit 1
+                    where labelName == "{self.labelName}" 
+                    context by TradeDate,TradeTime limit 1
                 pt = lj(factorPt, labelPt, `TradeDate`TradeTime)
             }}else{{ // 分钟频
                 factorPt = select 1.0 as period from loadTable("{self.factorDB}","{self.factorTB}")
+                    where date between {self.startDate} and {self.endDate}
                     group by date as TradeDate, time as TradeTime
                 labelPt = select TradeDate, TradeTime, MaxDate, MaxTime 
                     from loadTable("{self.labelDB}","{self.labelTB}")
-                    where labelName == "{self.labelName}" context by TradeDate,TradeTime limit 1
+                    where labelName == "{self.labelName}" 
+                    context by TradeDate,TradeTime limit 1
                 pt = lj(factorPt, labelPt, `TradeDate`TradeTime)
             }}
             update pt set period = cumsum(period);
@@ -217,7 +221,7 @@ class ModelBackTest:
     def init_resultDB(self, dropDB: bool = False, dropTB: bool = False):
         """
         初始化结果保存数据库 ->
-        resultDesc symbol TradeDate TradeTime method label labelPred method
+        ModelName symbol TradeDate TradeTime label labelPred
         """
         if dropDB and self.session.existsDatabase(self.resultDB):
             self.session.dropDatabase(self.resultDB)
@@ -418,21 +422,6 @@ class ModelBackTest:
                                             tableName=self.factorTB,
                                            ddbSession=self.session)
 
-        # 训练集&测试集划分函数
-        self.session.run(f"""
-        def trainTestSplit(data){{
-            trainSplit = {self.splitTrain};
-            setRandomSeed({self.seed});
-            n = rows(data)
-            allScores = randNormal(0,1,n)   // 所有行的得分
-            allRows = 0..(n-1)
-            trainRows = allRows[allScores>=percentile(allScores,trainSplit*100,"linear")]
-            testRows = allRows[!(allRows in trainRows)]
-            trainData = data[trainRows, ]
-            testData = data[testRows, ]
-            return trainData, testData
-        }}
-        """)
         # 确定最小的period -> select 有时会舍弃一部分开头的数据
         minPeriod = self.session.run(f"""
         t = exec min(concatDateTime(TradeDate,TradeTime)) 
@@ -461,8 +450,7 @@ class ModelBackTest:
                                      labelName=self.labelName,
                                      startPeriod=currentPeriod-self.callBackPeriod,
                                      endPeriod=currentPeriod-1)
-            factorList = [i for i in list(trainData.columns)
-                          if i not in ["symbol","TradeDate","TradeTime","label"]]
+            factorList = [i for i in list(trainData.columns) if i not in ["symbol","TradeDate","TradeTime","label"]]
             predData = self.getData(selectMethod=self.selectMethod,
                                     labelName=self.labelName,
                                     startPeriod=currentPeriod,
@@ -522,7 +510,7 @@ if __name__ == "__main__":
     M = ModelBackTest(session, pool,
                       startDate="20200101", endDate="20250430",
                       factorDB="dfs://Dayfactor",
-                      factorTB="pt", freq="D", toFactorDB=True, factorPrefix="ShioInter_",
+                      factorTB="pt", freq="D", toFactorDB=True, factorPrefix="Test_",
                       factorList=["shio",
                             "shio_avg20",
                             "shio_std20",
