@@ -260,7 +260,7 @@ class BasicModelBackTest:   # 基础训练类
                     matchingCols = ["symbol","TradeDate","TradeTime"]
                 }}
                 select * from lj(factor_df,label_df, matchingCols);
-            """)
+            """, disableDecimal=True)
             return data
 
         else:
@@ -311,7 +311,7 @@ class BasicModelBackTest:   # 基础训练类
                     matchingCols = ["symbol","TradeDate","TradeTime"]
                 }}
                 select * from lj(factor_df,label_df, matchingCols);
-            """)
+            """, disableDecimal=True)
             return data
 
     def train(self, x: any, y: any, modelName: str, cv:int = 5, evalSet: List[Tuple] = None) -> BaseEstimator:
