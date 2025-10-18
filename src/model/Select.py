@@ -1,8 +1,8 @@
 import dolphindb as ddb
 import pandas as pd
-from src.ModelBackTest import ModelBackTest
+from src.ModelBackTest import *
 
-def get_DayFeature(self: ModelBackTest):
+def get_DayFeature(self: BasicModelBackTest):
     """
     symbol TradeDate TradeTime method featureName period
 

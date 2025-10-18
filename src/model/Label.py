@@ -1,6 +1,6 @@
-from src.ModelBackTest import ModelBackTest
+from src.ModelBackTest import *
 
-def get_DayLabel(self: ModelBackTest):
+def get_DayLabel(self: BasicModelBackTest):
     """
     统一的日频标签生成函数
     -> return table(
@@ -34,7 +34,7 @@ def get_DayLabel(self: ModelBackTest):
     loadTable("{self.labelDB}","{self.labelTB}").append!(label_df)
     """)
 
-def get_MinLabel(self: ModelBackTest):
+def get_MinLabel(self: BasicModelBackTest):
     """
        统一的分钟频标签生成函数
        -> return table(
