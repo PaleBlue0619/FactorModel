@@ -7,20 +7,33 @@ src <br>
 -utils.py 工具模块 <br>
 config<br>
 -model_cfg.json5 # 模型配置文件(固定参数+网格搜索参数)<br>
+```json5
+// 树模型
+"gbdt": {
+    "default_params": {
+        "criterion": "friedman_mse",
+        "random_state": 42
+    },
+    "grid_params": {
+        "max_depth": [null,5,10],
+        "min_samples_split": [2,3,4],
+        "min_samples_leaf": [1,3,5],
+        "max_features": [1,2]
+    }
+},...
+```
+- period_cfg.json5 # 回测区间配置文件 (period:{train: test: end}) <br>
 
-    // 树模型
-    "gbdt": {
-      "default_params": {
-          "criterion": "friedman_mse",
-          "random_state": 42
-      },
-      "grid_params": {
-          "max_depth": [null,5,10],
-          "min_samples_split": [2,3,4],
-          "min_samples_leaf": [1,3,5],
-          "max_features": [1,2]
-      }
-      },...
+```json5
+// 区间配置
+"1": {
+    "train": ["20180107", 1500, "20180113", 1500],
+    "test": ["20180114", 1500, "20180120", 1500],
+    "pred": ["20180121", 1500, "20180407", 1500]},
+"2": {
+    "train": ["20180325", 1500, "20180331", 1500],...
+    }
+```
 
 model <br>
  Label.py, # 向标签数据库中添加数据的自定义函数<br>
@@ -31,20 +44,21 @@ model <br>
 # 2. 函数说明
 # 2.1 ModelBackTest类
 ```python
-class ModelBackTest:
-    def __init__(self, session: ddb.session, pool:ddb.DBConnectionPool, startDate: str, endDate: str, factorDB: str, factorTB: str, factorList: str, freq: str, toFactorDB: bool, # 模型频率(D/M)
-    model_cfg: Dict, savePath: str,  # 本地模型保存路径: savePath/{modelName}
-    selectDB: str, selectTB: str, selectMethod: str, selectFunc, # 每期模型的特征: symbol tradeDate tradeTime featureName
-    labelDB: str, labelTB: str, labelName: str, labelFunc,   # 每期模型的标签
-    resultDB: str, resultTB: str,  # 每期模型的结果
-    seed: int = 42, nJobs: int = -1, cv: int = 5, # K折交叉验证
-    earlyStopping: bool = False,   # 是否对能够使用早停的模型进行早停
-    callBackPeriod: int = 1,   # 利用过去K期数据进行训练
-    splitTrain: float = 0.8,   # 训练集划分比例
-    selfModel: Dict = None,   # 自定义模型<模型名称:接口函数列表>
-    modelList: list = None,
-    factorPrefix: str = ""     # toFactorDB == True时生效, 保存至因子数据库的因子为: factorPrefix+ModelName
-    ):
+class BasicModelBackTest:   # 基础训练类
+    def __init__(self, session: ddb.session, pool:ddb.DBConnectionPool,
+        factorDB: str, factorTB: str, factorList: str, freq: str, toFactorDB: bool,  # 模型频率(D/M)
+        model_cfg: Dict, savePath: str,  # 本地模型保存路径: savePath/{modelName}
+        selectDB: str, selectTB: str, selectMethod: str, selectFunc,
+        # 每期模型的特征: symbol tradeDate tradeTime featureName
+        labelDB: str, labelTB: str, labelName: str, labelFunc,  # 每期模型的标签
+        resultDB: str, resultTB: str,  # 每期模型的结果
+        seed: int = 42, nJobs: int = -1, cv: int = 5,  # K折交叉验证
+        earlyStopping: bool = False,  # 是否对能够使用早停的模型进行早停
+        selfModel: Dict = None,
+        modelList: list = None,
+        factorPrefix: str = ""  # toFactorDB == True时生效, 保存至因子数据库的因子为factorPrefix+ModelName
+        ):
+
 ```
 session: DolphinDB session <br>
 pool: DolphinDB Connection Pool <br>
@@ -71,8 +85,6 @@ seed: 随机种子 <br>
 nJobs: 训练多个模型的并行度 <br>
 cv: K折交叉验证 <br>
 earlyStopping: 是否对于能够早停的模型进行早停 <br>
-callBackPeriod: 回看期:利用[t-callBackPeriod,t-1]的样本进行训练 <br>
-splitTrain: 训练集-测试集划分比例 <br>
 selfModel: 自定义模型配置项 <br>
 modelList: 所有使用的模型list <br>
 factorPrefix: 保存至因子数据库的合成因子前缀, 完整因子名为factorPrefix+ModelName <br>
@@ -85,14 +97,6 @@ def get_factorList(self): -> list
     """
 ```
 inplace: 是否覆盖当前设置的factor_list<br>
-```python
-def get_periodList(self):
-    """
-    返回一个共享变量->TradeDate TradeTime period
-    最终格式: symbol TradeDate TradeTime period label factor
-    共享变量: TradeDate TradeTime MaxDate MaxTime period
-    """
-```
 ```python
 def init_labelDB(self, dropDB: bool = False, dropTB: bool = False):
     """初始化标签数据库"""
@@ -122,16 +126,12 @@ modelFunc: 模型函数方法 <br>
 cv: k折交叉验证 <br>
 evalSet: 验证集 <br>
 ```python
-def run(self, startDate: pd.Timestamp, startTime: int, endDate: pd.Timestamp, endTime:int)
+def run(self): 
 ```
-startDate: 开始日期 <br>
-startTime: 开始时间 <br>
-endDate: 结束日期 <br>
-endTime: 结束时间 <br>
 > 1. 准备相关appender+创建路径 <br>
 > 2. 确定回测区间+创建共享变量以指定边界 <br>
 > 3. for loop <br>
-> 3.1 通过getData方法获取数据 <br>
+> 3.1 结合本地cache, 通过getData方法获取增量数据 <br>
 > 3.2 并行训练模型,寻找最优参数,将最优参数生成模型 <br>
 > 3.3 保存最优模型至本地文件夹 <br>
 > 3.4 利用最优参数模型进行预测,得到合成因子(预测收益率) <br>

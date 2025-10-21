@@ -1,8 +1,9 @@
-import os,re,glob
+import os,re,glob,json
 import datetime
 from typing import List
 import bisect
 import numpy as np
+import pandas as pd
 import pickle
 import joblib
 
@@ -85,3 +86,57 @@ def load_model(load_path: str, file_name: str, target_format: str):
     elif target_format == 'bin':
         with open(full_path, 'rb') as f:
             return pickle.loads(f.read())
+
+
+import pandas as pd
+
+
+def generate_freq_folds(start_date, end_date, freq='D',
+                        train_period: int = 20,
+                        test_period: int = 5,
+                        pred_period: int = 20):
+    """
+    生成多频率时序划分
+    freq: D-日, W-周, M-月, Q-季
+    """
+    # 生成完整日期序列
+    dates = pd.date_range(start_date, end_date, freq=freq)
+    date_strs = [d.strftime('%Y%m%d') for d in dates]
+
+    result = {}
+    period = 0
+    counter = 0
+    while True:
+        counter += 1
+        # 计算各段索引
+        train_test_split_idx = period + train_period - 1
+        test_pred_split_idx = period + train_period + test_period - 1
+        pred_end_idx = period + train_period + test_period + pred_period
+        train_start = date_strs[period]
+        train_end = (pd.Timestamp(date_strs[train_test_split_idx]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
+        test_start = date_strs[train_test_split_idx]
+        test_end = (pd.Timestamp(date_strs[test_pred_split_idx]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
+        pred_start = date_strs[test_pred_split_idx]
+        pred_end = (pd.Timestamp(date_strs[min(pred_end_idx, len(date_strs) - 1)]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
+
+        # 检查是否超出范围
+        if pred_end_idx >= len(date_strs):
+            break
+
+        result[str(counter)] = {
+            "train": [train_start, 1500, train_end, 1500],
+            "test": [test_start, 1500, test_end, 1500],
+            "pred": [pred_start, 1500, pred_end, 1500]
+        }
+        period += pred_period + 1
+    return result
+
+if __name__ == "__main__":
+    # 使用示例
+    start_date = '20180101'
+    end_date = '20251231'
+
+    result = generate_freq_folds(start_date, end_date, freq="W",
+                                 train_period=2, test_period=1, pred_period=10)
+    with open(r"D:\DolphinDB\Project\FactorModel\src\config\period_cfg.json5", "w") as f:
+        f.write(json.dumps(result))
