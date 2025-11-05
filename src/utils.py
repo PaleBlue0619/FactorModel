@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import pickle
 import joblib
+import pandas as pd
+import pandas_market_calendars as mcal
 
 def init_path(path_dir):
     "创建当前.py目录下的文件夹"
@@ -87,20 +89,29 @@ def load_model(load_path: str, file_name: str, target_format: str):
         with open(full_path, 'rb') as f:
             return pickle.loads(f.read())
 
-
-import pandas as pd
-
-
-def generate_freq_folds(start_date, end_date, freq='D',
+def generate_freq_folds(start_date, end_date,
                         train_period: int = 20,
                         test_period: int = 5,
-                        pred_period: int = 20):
+                        pred_period: int = 20,
+                        calendar_name: str = 'SSE'):
     """
-    生成多频率时序划分
-    freq: D-日, W-周, M-月, Q-季
+    使用pandas_market_calendars生成时间序列，自动跳过节假日
+
+    Args:
+        start_date: 开始日期
+        end_date: 结束日期
+        train_period: 训练期长度
+        test_period: 测试期长度
+        pred_period: 预测期长度
+        calendar_name: 市场日历名称，默认为'SSE'(上海证券交易所)
+                      其他选项如'NYSE'(纽约证券交易所)等
     """
-    # 生成完整日期序列
-    dates = pd.date_range(start_date, end_date, freq=freq)
+    # 获取市场日历
+    calendar = mcal.get_calendar(calendar_name)
+
+    # 生成交易日序列
+    schedule = calendar.schedule(start_date=start_date, end_date=end_date)
+    dates = schedule.index.tolist()
     date_strs = [d.strftime('%Y%m%d') for d in dates]
 
     result = {}
@@ -112,16 +123,17 @@ def generate_freq_folds(start_date, end_date, freq='D',
         train_test_split_idx = period + train_period - 1
         test_pred_split_idx = period + train_period + test_period - 1
         pred_end_idx = period + train_period + test_period + pred_period
+
+        # 检查是否超出范围
+        if pred_end_idx >= len(date_strs):
+            break
+
         train_start = date_strs[period]
         train_end = (pd.Timestamp(date_strs[train_test_split_idx]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
         test_start = date_strs[train_test_split_idx]
         test_end = (pd.Timestamp(date_strs[test_pred_split_idx]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
         pred_start = date_strs[test_pred_split_idx]
         pred_end = (pd.Timestamp(date_strs[min(pred_end_idx, len(date_strs) - 1)]) - pd.Timedelta(1, "d")).strftime("%Y%m%d")
-
-        # 检查是否超出范围
-        if pred_end_idx >= len(date_strs):
-            break
 
         result[str(counter)] = {
             "train": [train_start, 1500, train_end, 1500],
@@ -136,7 +148,7 @@ if __name__ == "__main__":
     start_date = '20180101'
     end_date = '20251231'
 
-    result = generate_freq_folds(start_date, end_date, freq="W",
-                                 train_period=2, test_period=1, pred_period=10)
+    result = generate_freq_folds(start_date, end_date,
+                                 train_period=20, test_period=5, pred_period=20)
     with open(r"D:\DolphinDB\Project\FactorModel\src\config\period_cfg.json5", "w") as f:
         f.write(json.dumps(result))
