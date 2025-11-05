@@ -105,26 +105,40 @@ class BasicModelBackTest:   # 基础训练类
         self.labelName = labelName
         self.resultDB = resultDB
         self.resultTB = resultTB
-        self.cache = {}
-        # TODO: 这里换成异步接口MultiThreadedTableWriter, 同步分区上传会减慢整体运行速度
-        self.resultAppender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
-                                     tableName=self.resultTB,
-                                     partitionColName="TradeDate",
-                                     dbConnectionPool=self.pool)  # 写入数据的appender
-        self.factorAppender = ddb.TableAppender(dbPath=self.factorDB,
-                                            tableName=self.factorTB,
-                                           ddbSession=self.session)
+        self.cache = {} # 此时有标签的数据
+        # # TODO: 这里换成异步接口MultiThreadedTableWriter, 同步分区上传会减慢整体运行速度
+        self.resultAppender = None
+        self.factorAppender = None
         # 结果部分
         self.selectFunc = selectFunc
         self.labelFunc = labelFunc
 
     def uploadResultData(self, data: pd.DataFrame):
-        self.session.run(f"""resTable = loadTable("{self.resultDB}","{self.resultTB}")""")
-        self.session.run("""tableInsert{resTable}""", data)
+        if not self.resultAppender:
+            # self.resultAppender = ddb.PartitionedTableAppender(dbPath=self.resultDB,
+            #                                                    tableName=self.resultTB,
+            #                                                    partitionColName="TradeDate",
+            #                                                    dbConnectionPool=self.pool)  # 写入数据的appender
+            self.resultAppender = ddb.MultithreadedTableWriter(host=session.host, port=session.port,
+                                                                  userId=session.userid, password=session.password,
+                                                                  dbPath=self.resultDB, tableName=self.resultTB,
+                                                                  partitionCol="TradeDate", threadCount=1)
+        for index, row in data.iterrows():
+            self.resultAppender.insert(*row.values)
+
+        # self.resultAppender.append(data)
 
     def uploadFactorData(self, data: pd.DataFrame):
-        self.session.run(f"""factorTable = loadTable("{self.factorDB}","{self.factorTB}")""")
-        self.session.run("""tableInsert{factorTable}""", data)
+        if not self.factorAppender:
+            # self.factorAppender = ddb.TableAppender(dbPath=self.factorDB,
+            #                                         tableName=self.factorTB,
+            #                                         ddbSession=self.session)
+            self.factorAppender = ddb.MultithreadedTableWriter(host=session.host, port=session.port,
+                                                                  userId=session.userid, password=session.password,
+                                                                  dbPath=self.factorDB, tableName=self.factorTB,
+                                                                  partitionCol="date", threadCount=1)
+        for index,row in data.iterrows():
+            self.factorAppender.insert(*row.values)
 
     def get_factorList(self, inplace: bool = True) -> Dict:
         """
@@ -209,8 +223,9 @@ class BasicModelBackTest:   # 基础训练类
 
     def getData(self, selectMethod: str, labelName: str,
                 startDate: pd.Timestamp, startTime: int, endDate: pd.Timestamp, endTime: int,
-                factorList: list = None) -> pd.DataFrame:
+                factorList: list = None, isPred: bool = False) -> pd.DataFrame:
         """
+        @ 如果是WFA方式的话，那么预测集在取数的时候是永远永远用不到缓存的, 用到缓存说明取数方式有问题
         新增: self.cache = {"selectMethod$labelName": {pd.Timestamp: data}} 表示缓存,
         从而使得根据缓存中的数据动态本次增量查询的SQL长度
         返回一张宽表: symbol,TradeDate,TradeTime,label,factorList
@@ -221,13 +236,14 @@ class BasicModelBackTest:   # 基础训练类
         :param endDate: 结束日期
         :param endTime: 结束时间
         :param factorList: Optional, 不填则根据[startPeriod,endPeriod]区间的所有factorList进行选择
+        :param isPred: 取出来的是否是预测数据集
         :return:
         """
         if not factorList:
             factorList = []
         startTime = str(startTime).zfill(4)
         endTime = str(endTime).zfill(4)
-
+        oriStartDate = startDate  # 记录开始时间, 考虑一种情况, 本来只需要取20200115~20200201的数据,但是现在数据集里面只有~20200101的数据,此时startDate会变成20200101,最后会取出20200101~20200201的数据,相当于多取了
         cacheKey = f"{selectMethod}${labelName}"
         state = 1   # 0: 表示不用跑SQL 1: 表示需要增量跑 SQL
         if cacheKey in self.cache.keys():
@@ -240,10 +256,13 @@ class BasicModelBackTest:   # 基础训练类
         else:
             self.cache[cacheKey] = {}
 
+        returnNoLabel = False   # 是否返回无标签数据
+        dataDict = {}
+        # TODO: 应该先取的是label-> MaxDate & MaxTime 对应的 TradeDate & TradeTime 之后, 再去取因子
         if state == 1:
-            if startDate == endDate and startTime == endTime:
+            if startDate == endDate and startTime == endTime: # 说明取数的人是知道他在干什么的, 用tradeDate+tradeTime匹配即可
                 # 说明只需要取一个Period的factor
-                data = self.session.run(rf"""
+                data: pd.DataFrame = self.session.run(rf"""
                     // 配置项
                     freq = "{self.freq.lower()}"
                     targetDate = {startDate.strftime("%Y.%m.%d")}
@@ -267,11 +286,10 @@ class BasicModelBackTest:   # 基础训练类
                         // 因子数据
                         factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}") 
                                     where factor in featureList and date == targetDate 
-                                    pivot by symbol, date as TradeDate, factor
-                        update factor_df set TradeTime = 15:00:00.000
+                                    pivot by symbol,date as TradeDate, factor
                         // 标签数据
                         label_df = select symbol,TradeDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
-                                    where labelName == "{labelName}" and TradeDate == targetDate and TradeTime == targetTime
+                                    where labelName == "{labelName}" and TradeDate == targetDate
                         matchingCols = ["symbol","TradeDate"]            
                     }}else{{    // 分钟频
                         // 因子数据
@@ -279,17 +297,23 @@ class BasicModelBackTest:   # 基础训练类
                                     where factor in featureList and date == targetDate and time == targetTime
                                     pivot by symbol, date as TradeDate, time as TradeTime, factor
                         // 标签数据
-                        label_df = select symbol,TradeDate,TradeTime,label from loadTable("{self.labelDB}","{self.labelTB}") 
+                        label_df = select symbol,TradeDate,TradeTime,label 
+                                    from loadTable("{self.labelDB}","{self.labelTB}") 
                                     where labelName == "{labelName}" and TradeDate == targetDate and TradeTime == targetTime
                         matchingCols = ["symbol","TradeDate","TradeTime"]
                     }}
-                    select * from lj(factor_df,label_df, matchingCols);
+                    if ({int(isPred)} == 1){{  // 预测集不需要考虑标签
+                        result = select * from lj(factor_df, label_df, matchingCols);
+                    }}else{{
+                        result = select * from lj(label_df, factor_df, matchingCols);
+                    }}
+                    result
                 """, disableDecimal=True)
-                return data
+                return data     # 只查一个的不走缓存
 
-            else:
+            else:   # 说明取数的人大概率知道里面有未来数据，需要剔除
                 # 说明需要取一个区间的数据
-                data = self.session.run(rf"""
+                dataDict: Dict[str, pd.DataFrame] = self.session.run(rf"""
                     // 配置项
                     freq = "{self.freq.lower()}"
                     startDate = {startDate.strftime("%Y.%m.%d")}
@@ -315,35 +339,69 @@ class BasicModelBackTest:   # 基础训练类
     
                     // 从因子数据库&标签数据库中获取数据
                     if (freq=="d"){{    // 日频
+                        // 标签数据(多取一列MaxDate用于存入对应日期的Cache)
+                        label_df = select symbol,TradeDate,MaxDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
+                                    where labelName == "{labelName}" and (MaxDate between startDate and endDate) 
+                        if ({int(isPred)} == 1){{
+                            minDate = startDate
+                            maxDate = endDate
+                        }}else{{
+                            dateList = sort(exec distinct TradeDate from label_df)
+                            minDate = first(dateList)
+                            maxDate = last(dateList)
+                        }}
                         // 因子数据
                         factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}") 
-                                    where factor in featureList and (date between startDate and endDate) 
+                                    where factor in featureList and (date between minDate and endDate) 
                                     pivot by symbol, date as TradeDate, factor
-                        update factor_df set TradeTime = 15:00:00.000
-                        // 标签数据
-                        label_df = select symbol,TradeDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
-                                    where labelName == "{labelName}" and (TradeDate between startDate and endDate)
+                        update factor_df set TradeTime = 15:00:00.000                                   
                         matchingCols = ["symbol","TradeDate"]            
                     }}else{{    // 分钟频
+                        // 标签数据(多取一列MaxDate用于存入对应日期的Cache)
+                        label_df = select symbol,TradeDate,TradeTime,MaxDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
+                                    where labelName == "{labelName}" and (concatDateTime(MaxDate,MaxTime) between startTimeStamp and endTimeStamp)
+                        if ({int(isPred)} == 1){{
+                            minTimestamp = startTimeStamp
+                            maxTimestamp = endTimeStamp
+                        }}else{{
+                            timeList = sort(exec distinct concat(TradeDate,TradeTime) from label_df)
+                            minTimestamp = first(timeList)
+                            maxTimestamp = last(timeList)
+                        }}
                         // 因子数据
                         factor_df = select value from loadTable("{self.factorDB}","{self.factorTB}")
-                                    where factor in featureList and (concatDateTime(date,time) between startTimeStamp and endTimeStamp)
+                                    where factor in featureList and (concatDateTime(date,time) between minTimestamp and maxTimestamp)
                                     pivot by symbol, date as TradeDate, time as TradeTime, factor
-                        // 标签数据
-                        label_df = select symbol,TradeDate,TradeTime,label from loadTable("{self.labelDB}","{self.labelTB}") 
-                                    where labelName == "{labelName}" and (concatDateTime(TradeDate,TradeTime) between startTimeStamp and endTimeStamp)
                         matchingCols = ["symbol","TradeDate","TradeTime"]
                     }}
-                    select * from lj(factor_df,label_df, matchingCols);
+                    if ({int(isPred)} == 1){{  // 预测集不需要考虑标签
+                        data = select * from lj(factor_df, label_df, matchingCols);
+                    }}else{{
+                        data = select * from lj(label_df, factor_df, matchingCols);
+                    }}
+                    result = dict(STRING, ANY)
+                    result["hasLabel"] = select * from data where not isNull(label);
+                    data0 = select * from data where isNull(label)
+                    if (rows(data0) != 0){{
+                        result["noLabel"] = select * from data where isNull(label);
+                    }}
+                    result
                 """, disableDecimal=True)
 
-            # 将data塞入self.cache中
-            for date in set(data["TradeDate"]):
-                self.cache[cacheKey][date] = data[data["TradeDate"] == date].reset_index(drop=True)
+            # 只将有Label的数据写入缓存,防止污染缓存数据
+            cacheData = dataDict["hasLabel"]
+            for data in set(cacheData["MaxDate"]):
+                self.cache[cacheKey][data] = cacheData[cacheData["MaxDate"] == data].reset_index(drop=True)
+            if isPred and "noLabel" in dataDict.keys(): # 只有预测数据需要返回无标签数据
+                returnNoLabel = True
 
-        return pd.concat([self.cache[cacheKey][date]
-                          for date in self.cache[cacheKey].keys() if startDate<=date<=endDate],
-                axis=0,ignore_index=True)
+        # 缓存里的数据都有标签
+        result = pd.concat([self.cache[cacheKey][date]
+                    for date in self.cache[cacheKey].keys() if oriStartDate <= date <= endDate],
+                    axis=0, ignore_index=True)
+        if not returnNoLabel:
+            return result
+        return pd.concat([result, dataDict["noLabel"]])
 
     def train(self, x: any, y: any, modelName: str, cv:int = 5, evalSet: List[Tuple] = None) -> BaseEstimator:
         """
@@ -371,10 +429,10 @@ class BasicModelBackTest:   # 基础训练类
             modelMethod = self.modelFunc[modelName](**default_params)
         grid = GridSearchCV(estimator=modelMethod,
                             param_grid=grid_params,
-                            cv=cv,
+                            cv=cv, error_score='raise',
                             n_jobs=self.nJobs)
         # 是否早停
-        if modelName in self.earlyStopModel and evalSet:
+        if modelName in self.earlyStopModel and evalSet is not None:
             grid.fit(x, y, eval_set=evalSet)
         else:
             grid.fit(x, y)
@@ -389,8 +447,21 @@ class BasicModelBackTest:   # 基础训练类
         return bestModel.fit(x, y)
 
 class ModelBackTest(BasicModelBackTest):
-    def __init__(self, periodDict: dict, **kwargs):
-        super(ModelBackTest2, self).__init__(**kwargs)
+    def __init__(self, session: ddb.session, pool: ddb.DBConnectionPool, periodDict: dict,
+                 factorDB: str, factorTB: str, factorList: str, freq: str, toFactorDB: bool,  # 模型频率(D/M)
+                 model_cfg: Dict, savePath: str,  # 本地模型保存路径: savePath/{modelName}
+                 selectDB: str, selectTB: str, selectMethod: str, selectFunc,
+                 # 每期模型的特征: symbol tradeDate tradeTime featureName
+                 labelDB: str, labelTB: str, labelName: str, labelFunc,  # 每期模型的标签
+                 resultDB: str, resultTB: str,  # 每期模型的结果
+                 seed: int = 42, nJobs: int = -1, cv: int = 5,  # K折交叉验证
+                 earlyStopping: bool = False,  # 是否对能够使用早停的模型进行早停
+                 selfModel: Dict = None,
+                 modelList: list = None,
+                 factorPrefix: str = ""):
+        super().__init__(session, pool, factorDB, factorTB, factorList, freq, toFactorDB, model_cfg, savePath, selectDB,
+                         selectTB, selectMethod, selectFunc, labelDB, labelTB, labelName, labelFunc, resultDB, resultTB,
+                         seed, nJobs, cv, earlyStopping, selfModel, modelList, factorPrefix)
         self.periodDict = {int(k): v for k,v in periodDict.items()}
         self.periodList = sorted([int(i) for i in self.periodDict.keys()])
         # 规范格式为2020.01.01
@@ -414,63 +485,70 @@ class ModelBackTest(BasicModelBackTest):
             trainStartDate, trainStartTime, trainEndDate, trainEndTime = train_period
             testStartDate, testStartTime, testEndDate, testEndTime = test_period
             predStartDate, predStartTime, predEndDate, predEndTime = pred_period
-
             trainData = self.getData(selectMethod=self.selectMethod,
                                      labelName=self.labelName,
                                      startDate=trainStartDate,startTime=trainStartTime,
                                      endDate=trainEndDate,endTime=trainEndTime
                                      )
+            trainData = trainData[~trainData["label"].isna()].reset_index(drop=True)
             print("trainData getted")
             testData = self.getData(selectMethod=self.selectMethod,
                                      labelName=self.labelName,
                                      startDate=testStartDate,startTime=testStartTime,
                                      endDate=testEndDate,endTime=testEndTime
                                      )
+            testData = testData[~testData["label"].isna()].reset_index(drop=True)
             print("testData getted")
             factorList = [i for i in list(set(trainData.columns).intersection(set(testData.columns)))
-                            if i not in ["symbol","TradeDate","TradeTime","label"]]
+                            if i not in ["symbol","TradeDate","MaxDate","TradeTime","label"]]
             predData = self.getData(selectMethod=self.selectMethod,
                                     labelName=self.labelName,
                                     startDate=predStartDate, startTime=predStartTime,
                                     endDate=predEndDate, endTime=predEndTime,
-                                    factorList=factorList   # 这里与训练集的特征保持一致
+                                    factorList=factorList,   # 这里与训练集的特征保持一致
+                                    isPred=True
                                     )
             print("predData getted")
             train_x, train_y = trainData[factorList], trainData["label"]
             eval_x, eval_y = testData[factorList], testData["label"]
-            pred_x, real_y = predData[factorList], predData["label"]
+            combined_x = None
+            combined_y = None
+            print("train:", trainData["TradeDate"].min(), trainData["TradeDate"].max())
+            pred_x = predData[factorList]
+            print("pred:", predData["TradeDate"].min(), predData["TradeDate"].max())
             # ---train---
             for modelName in self.model_list:
                 if modelName in self.earlyStopModel and self.earlyStopping: # 启用早停机制
                     bestModel = self.train(train_x, train_y, modelName=modelName, cv=self.cv,
                                evalSet=[(eval_x, eval_y)])
                 else:   # 不启用早停机制
-                    bestModel = self.train(train_x, train_y, modelName=modelName, cv=self.cv, evalSet=None)
+                    if not combined_x:
+                        combined_x = pd.concat([train_x, eval_x], axis=0, ignore_index=True)
+                        combined_y = pd.concat([train_y, eval_y], axis=0, ignore_index=True)
+                    bestModel = self.train(combined_x, combined_y, modelName=modelName, cv=self.cv, evalSet=None)
                 # 保存模型
                 save_model(bestModel,
                            save_path=rf"{self.savePath}/{modelName}",
-                           file_name=str(period),
+                           file_name=str(testEndDate.strftime("%Y%m%d"))+"_"+str(testEndTime).zfill(4),
                            target_format="bin")
             # ---pred---
             for modelName in self.model_list:
                 bestModel = load_model(load_path=rf"{self.savePath}/{modelName}",
-                           file_name=str(period),
+                           file_name=str(testEndDate.strftime("%Y%m%d"))+"_"+str(testEndTime).zfill(4),
                            target_format="bin")
                 res = predData[["symbol","TradeDate","TradeTime","label"]]
                 res["labelPred"] = bestModel.predict(pred_x)
                 res.insert(0, "ModelName", [modelName]*res.shape[0])
                 # 保存至数据库
                 self.uploadResultData(res)
-                # self.resultAppender.append(res)
 
                 if self.toFactorDB:
                     res["ModelName"] = self.factorPrefix+res["ModelName"]   # 添加前缀
                     if self.freq.lower() == "d":
-                        self.uploadFactorData(res[["symbol","TradeDate","ModelName","label"]])
-                        # self.factorAppender.append(res[["symbol","TradeDate","ModelName","label"]])
+                        self.uploadFactorData(res[["symbol","TradeDate","ModelName","labelPred"]])
+
                     else:
-                        self.uploadFactorData(res[["symbol","TradeDate","TradeTime","ModelName","label"]])
-                        # self.factorAppender.append(res[["symbol","TradeDate","TradeTime","ModelName","label"]])
+                        self.uploadFactorData(res[["symbol","TradeDate","TradeTime","ModelName","labelPred"]])
 
 if __name__ == "__main__":
     session = ddb.session(enableASYNC=False)  # 允许异步上传数据
@@ -518,7 +596,7 @@ if __name__ == "__main__":
     M = ModelBackTest(**config_dict, periodDict=period_cfg)
     # M.init_labelDB(dropDB=False,dropTB=True)        # 创建预测标签数据库
     # M.init_selectDB(dropDB=False,dropTB=True)       # 创建因子选择数据库
-    # M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
+    M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
     # M.add_labelData()   # 添加标签数据库
     # M.add_selectData()  # 添加选择数据库
     M.run()
