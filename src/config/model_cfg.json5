@@ -67,7 +67,7 @@
           "n_estimators": [100,200],
           "learning_rate": [0.01,0.05,0.1],
           "num_leaves": [15,31],
-//          "max_depth": [3, 5, -1],
+//          "max_depth": [3, 5, 0],
           "min_child_samples": [10,20,100],
           "reg_alpha": [0.01,0.1,1.0]     // L1正则化系数(由于数据维度较高)
       },
@@ -84,7 +84,7 @@
       "grid_params": {
           "n_estimators": [100,200],
           "learning_rate": [0.01,0.05,0.1],
-          "max_depth": [3, 5, -1],
+          "max_depth": [3, 5, 0],
           "subsample": [0.6,0.8,1.0],       // 样本采样比例(参照随机森林)
           "reg_alpha": [0.01,0.1,1.0]     // L1正则化系数(由于数据维度较高)
       }

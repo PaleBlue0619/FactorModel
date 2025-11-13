@@ -146,9 +146,9 @@ def generate_freq_folds(start_date, end_date,
 if __name__ == "__main__":
     # 使用示例
     start_date = '20180101'
-    end_date = '20251231'
+    end_date = '20251109'
 
     result = generate_freq_folds(start_date, end_date,
-                                 train_period=20, test_period=5, pred_period=20)
+                                 train_period=20, test_period=10, pred_period=20)
     with open(r"D:\DolphinDB\Project\FactorModel\src\config\period_cfg.json5", "w") as f:
         f.write(json.dumps(result))

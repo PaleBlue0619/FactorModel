@@ -19,6 +19,7 @@ from xgboost import XGBRegressor        # XGB
 from typing import List, Dict, Tuple
 from utils import init_path, get_glob_list, save_model, load_model
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import functools
 
 class BasicModelBackTest:   # 基础训练类
     def __init__(self, session: ddb.session, pool:ddb.DBConnectionPool,
@@ -255,7 +256,6 @@ class BasicModelBackTest:   # 基础训练类
                 startDate = maxCacheDate  # 修改开始时间为最大时间
         else:
             self.cache[cacheKey] = {}
-
         returnNoLabel = False   # 是否返回无标签数据
         dataDict = {}
         # TODO: 应该先取的是label-> MaxDate & MaxTime 对应的 TradeDate & TradeTime 之后, 再去取因子
@@ -316,12 +316,14 @@ class BasicModelBackTest:   # 基础训练类
                 dataDict: Dict[str, pd.DataFrame] = self.session.run(rf"""
                     // 配置项
                     freq = "{self.freq.lower()}"
+                    oriStartDate = {oriStartDate.strftime("%Y.%m.%d")}
                     startDate = {startDate.strftime("%Y.%m.%d")}
                     startTime = {str(startTime[:2])+":"+str(startTime[2:])+":00.000"}
                     endDate = {endDate.strftime("%Y.%m.%d")}
                     endTime = {str(endTime[:2])+":"+str(endTime[2:])+":00.000"}
                     startTimeStamp = concatDateTime(startDate, startTime);
                     endTimeStamp = concatDateTime(endDate, endTime);
+                    oriStartDate = concatDateTime(oriStartDate, startTime);
                     
                     // 获取特征列名称
                     featureList = exec distinct featureName  
@@ -342,6 +344,7 @@ class BasicModelBackTest:   # 基础训练类
                         // 标签数据(多取一列MaxDate用于存入对应日期的Cache)
                         label_df = select symbol,TradeDate,MaxDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
                                     where labelName == "{labelName}" and (MaxDate between startDate and endDate) 
+                                    and TradeDate>=oriStartDate
                         if ({int(isPred)} == 1){{
                             minDate = startDate
                             maxDate = endDate
@@ -359,7 +362,9 @@ class BasicModelBackTest:   # 基础训练类
                     }}else{{    // 分钟频
                         // 标签数据(多取一列MaxDate用于存入对应日期的Cache)
                         label_df = select symbol,TradeDate,TradeTime,MaxDate,label from loadTable("{self.labelDB}","{self.labelTB}") 
-                                    where labelName == "{labelName}" and (concatDateTime(MaxDate,MaxTime) between startTimeStamp and endTimeStamp)
+                                    where labelName == "{labelName}" 
+                                    and (concatDateTime(MaxDate,MaxTime) between startTimeStamp and endTimeStamp)
+                                    and TradeDate>=oriStartDate
                         if ({int(isPred)} == 1){{
                             minTimestamp = startTimeStamp
                             maxTimestamp = endTimeStamp
@@ -558,6 +563,7 @@ if __name__ == "__main__":
     from model.Select import get_DayFeature
     from model.Dnn import CustomDNN,get_DNN
     from model.Resnet import CustomResNet,get_RESNET
+    labelFunc = functools.partial(get_DayLabel, k=5)
 
     with open(r".\config\model_cfg.json5","r",encoding="utf-8") as f:
         model_cfg = json5.load(f)
@@ -568,35 +574,50 @@ if __name__ == "__main__":
         factorDB="dfs://Dayfactor", factorTB="pt", freq="D", toFactorDB=True,
         factorPrefix="Test_",
         factorList=[
-            "shio",
-            "shio_avg20",
-            "shio_std20",
-            "shioStrong",
-            "shioStrong_avg20",
-            "shioStrong_std20",
-            "shioWeak",
-            "shioWeak_avg20",
-            "shioWeak_std20",
+            "interDayReturn",
+            "interDayReturn_avg20",
+            "interDayReturn_std20",
+            "interDayReturnReverse",
+            "interDayReturnReverse_avg20",
+            "interDayReturnReverse_std20",
+            "intraDayReturn",
+            "intraDayReturn_avg20",
+            "intraDayReturn_std20",
+            "intraDayReturnReverse",
+            "intraDayReturnReverse_avg20",
+            "intraDayReturnReverse_std20",
+            "intraDayTurnoverRateDiff",
+            "intraDayTurnoverRateDiff_avg20",
+            "intraDayTurnoverRateDiff_std20",
+            "intraDayTurnoverRateDiffReverse",
+            "intraDayTurnoverRateDiffReverse_avg20",
+            "intraDayTurnoverRateDiffReverse_std20",
+            "dayOverBenchRet",
+            "riskTR10",
+            "adjRiskTR10",
+            "riskTurnoverRate",
+            "umrTR10",
+            "umrTurnoverRate10"
             "interDayReturn",
             "interDayReturn_avg20",
             "interDayReturn_std20"],
-        model_cfg=model_cfg, cv=5, nJobs=-1, earlyStopping=True,
-        modelList=["lightgbm", "xgboost"],
+        model_cfg=model_cfg, cv=5, nJobs=8, earlyStopping=True,
+        modelList=["lightgbm"],
         selfModel={"dnn": [CustomDNN, get_DNN],
                    "resnet": [CustomResNet, get_RESNET]},
         savePath=r"D:\DolphinDB\Project\FactorModel\model",
         labelDB="dfs://DayLabel", labelTB="pt", labelName="ret5D",
-        selectDB="dfs://Select", selectTB="Select20250920", selectMethod="ret5D",
-        resultDB="dfs://Model", resultTB="Model20250920",
+        selectDB="dfs://Select", selectTB="pt", selectMethod="ret5D",
+        resultDB="dfs://Model", resultTB="pt",
         selectFunc=get_DayFeature,
-        labelFunc=get_DayLabel
+        labelFunc=labelFunc
     )
 
     # 回测方式
     M = ModelBackTest(**config_dict, periodDict=period_cfg)
-    # M.init_labelDB(dropDB=False,dropTB=True)        # 创建预测标签数据库
-    # M.init_selectDB(dropDB=False,dropTB=True)       # 创建因子选择数据库
-    M.init_resultDB(dropDB=False,dropTB=True)       # 创建模型训练结果保存数据库
+    # M.init_labelDB(dropDB=True,dropTB=True)        # 创建预测标签数据库
+    # M.init_selectDB(dropDB=True,dropTB=True)       # 创建因子选择数据库
+    # M.init_resultDB(dropDB=True,dropTB=True)       # 创建模型训练结果保存数据库
     # M.add_labelData()   # 添加标签数据库
     # M.add_selectData()  # 添加选择数据库
     M.run()
